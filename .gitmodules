@@ -1,0 +1,3 @@
+[submodule "thirdparties/webgpu"]
+	path = thirdparties/webgpu
+	url = https://github.com/eliemichel/WebGPU-distribution.git
