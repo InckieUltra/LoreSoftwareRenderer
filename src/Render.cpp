@@ -1,6 +1,9 @@
 ﻿#include "Render.h"
 #include <iostream>
 #include <corecrt_math_defines.h>
+#include <execution>
+#include "BVH.h"
+#include <stack>
 
 uint32_t toARGB(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return (a << 24) | (b << 16) | (g << 8) | r;
@@ -178,6 +181,12 @@ Texture RenderScene(Scene& scene, int width, int height) {
     return texture;
 }
 
+struct MeshAccel {
+    const Mesh* mesh;                     // 指向原 mesh
+    std::vector<BVHNode> bvhNodes;        // 当前 mesh 的 BVH
+    std::vector<TriangleRef> triangleRefs;
+    int rootNode = -1;                // BVH 的根节点索引
+};
 
 bool intersectRayTriangle(
     const Eigen::Vector3f& orig, const Eigen::Vector3f& dir,
@@ -204,6 +213,107 @@ bool intersectRayTriangle(
     return t > EPSILON;
 }
 
+bool intersectBVH(
+    const std::vector<BVHNode>& nodes,
+    const int rootNode,
+    const std::vector<Vertex>& vertices,
+    const std::vector<uint32_t>& indices,
+    const std::vector<TriangleRef>& triangles,
+    const Ray& ray,
+    float& outT, float& outU, float& outV, int& hitTriangleIndex
+) {
+    struct StackEntry { int nodeIdx; };
+    std::stack<StackEntry> stack;
+    stack.push({rootNode});
+
+    bool hit = false;
+    outT = std::numeric_limits<float>::max();
+    hitTriangleIndex = -1;
+
+    while (!stack.empty()) {
+        int nodeIdx = stack.top().nodeIdx;
+        stack.pop();
+        const BVHNode& node = nodes[nodeIdx];
+
+        float tMin = 0.0f, tMax = outT;
+        if (!node.bounds.intersect(ray, tMin, tMax))
+            continue;
+
+        if (node.isLeaf()) {
+            for (int i = node.start; i < node.start + node.count; ++i) {
+                const TriangleRef& tri = triangles[i];
+                float t, u, v;
+                if (intersectRayTriangle(ray.origin, ray.dir, 
+                    vertices[indices[tri.triangleIndex * 3 + 0]].position,
+                    vertices[indices[tri.triangleIndex * 3 + 1]].position,
+                    vertices[indices[tri.triangleIndex * 3 + 2]].position,
+                    t, u, v)
+                ) {
+                    if (t < outT && t > 1e-4f) {
+                        hit = true;
+                        outT = t;
+                        outU = u;
+                        outV = v;
+                        hitTriangleIndex = tri.triangleIndex;
+                    }
+                }
+            }
+        } else {
+            stack.push({node.left});
+            stack.push({node.right});
+        }
+    }
+
+    return hit;
+}
+
+//Eigen::Vector3f traceRay(
+//    const Ray& ray,
+//    const Scene& scene,
+//    const std::vector<BVHNode>& nodes,
+//    const std::vector<TriangleRef>& refs,
+//    int depth
+//) {
+//    if (depth > 3) return Eigen::Vector3f(0, 0, 0);  // 最多反射 3 次
+//
+//    float t, u, v;
+//    TriangleRef hitTri;
+//    const Mesh* hitMesh = nullptr;
+//
+//    bool hit = intersectBVH(ray, scene, nodes, refs, t, u, v, hitTri);
+//
+//    if (!hit) return Eigen::Vector3f(0.0f, 0.0f, 0.0f);  // 没命中，返回背景色
+//
+//    // === 命中后的插值计算 ===
+//    int triId = hitTri.triangleIndex;
+//    const auto& indices = hitMesh->indices;
+//    const auto& vertices = hitMesh->vertices;
+//
+//    const Vertex& v0 = vertices[indices[3 * triId + 0]];
+//    const Vertex& v1 = vertices[indices[3 * triId + 1]];
+//    const Vertex& v2 = vertices[indices[3 * triId + 2]];
+//    float w = 1 - u - v;
+//
+//    Eigen::Vector3f pos = ray.origin + t * ray.dir;
+//    Eigen::Vector3f normal = (w * v0.normal + u * v1.normal + v * v2.normal).normalized();
+//    Eigen::Vector3f color = (w * v0.color.head<3>() + u * v1.color.head<3>() + v * v2.color.head<3>());
+//
+//    // === 光照 ===
+//    Eigen::Vector3f lightDir = -scene.lights[0].direction.normalized();
+//    float diff = std::max(0.0f, normal.dot(lightDir));
+//    Eigen::Vector3f localColor = color * diff;
+//
+//    // === 反射光线 ===
+//    Eigen::Vector3f reflectDir = reflect(ray.dir.normalized(), normal).normalized();
+//    Ray reflectedRay(pos + 1e-4f * reflectDir, reflectDir);  // 避免自交
+//
+//    Eigen::Vector3f reflectedColor = traceRay(reflectedRay, scene, nodes, refs, depth + 1);
+//
+//    float reflectivity = 0.4f;  // 固定反射率，可以根据材质设置
+//
+//    return (1 - reflectivity) * localColor + reflectivity * reflectedColor;
+//}
+
 Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
     Texture texture;
     texture.width = width;
@@ -218,9 +328,46 @@ Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
     float aspect = width / (float)height;
     float tanHalfFovY = tan(fovY / 2.0f);
 
+    std::vector<MeshAccel> meshAccels;
+
+    for (auto& object: scene.objects) {
+        Eigen::Matrix4f modelMatrix = Eigen::Affine3f(
+            Eigen::Translation3f(object.transform.position) *
+            object.transform.rotation.toRotationMatrix() *
+            Eigen::Scaling(object.transform.scale)
+        ).matrix();
+        for (const auto& mesh : object.meshes) {
+            MeshAccel accel;
+            accel.mesh = &mesh;
+            std::vector<Eigen::Vector3f> positions;
+            for (size_t i = 0; i < mesh.indices.size(); i += 3) {
+                TriangleRef tri;
+                tri.triangleIndex = i/3;
+                Eigen::Vector3f v0 = mesh.vertices[mesh.indices[i]].position;
+                Eigen::Vector3f v1 = mesh.vertices[mesh.indices[i + 1]].position;
+                Eigen::Vector3f v2 = mesh.vertices[mesh.indices[i + 2]].position;
+                tri.centroid = (v0 + v1 + v2) / 3.0f;
+                accel.triangleRefs.push_back(tri);
+            }
+            accel.rootNode = buildBVH(
+                mesh.vertices,
+                mesh.indices,
+                accel.bvhNodes,
+                accel.triangleRefs,
+                0,
+                mesh.indices.size() / 3
+            );
+            meshAccels.push_back(accel);
+        }
+    }
+
     // 遍历每个像素
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
+    std::vector<int> indices(width * height);
+    std::iota(indices.begin(), indices.end(), 0);
+
+    std::for_each(std::execution::par, indices.begin(), indices.end(), [&](int loopIndex) {
+            int x = loopIndex % width;
+            int y = loopIndex / width;
             // 将屏幕像素坐标映射到 [-1, 1]
             float px = (2.0f * (x + 0.5f) / width - 1.0f) * aspect * tanHalfFovY;
             float py = (1.0f - 2.0f * (y + 0.5f) / height) * tanHalfFovY;
@@ -238,32 +385,72 @@ Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
                     Eigen::Scaling(object.transform.scale)
                 ).matrix();
                 Eigen::Matrix4f invModel = modelMatrix.inverse();
-
-                for (const auto& mesh : object.meshes) {
-                    for (size_t i = 0; i < mesh.indices.size(); i += 3) {
-                        const Vertex& v0 = mesh.vertices[mesh.indices[i]];
-                        const Vertex& v1 = mesh.vertices[mesh.indices[i + 1]];
-                        const Vertex& v2 = mesh.vertices[mesh.indices[i + 2]];
-
-                        // 变换顶点到世界空间
-                        Eigen::Vector3f p0 = (modelMatrix * v0.position.homogeneous()).hnormalized();
-                        Eigen::Vector3f p1 = (modelMatrix * v1.position.homogeneous()).hnormalized();
-                        Eigen::Vector3f p2 = (modelMatrix * v2.position.homogeneous()).hnormalized();
-
-                        float t, u, v;
-                        if (intersectRayTriangle(cameraPos, rayDir, p0, p1, p2, t, u, v)) {
-                            if (t < minT) {
-                                minT = t;
-
-                                // 简单着色（根据法线或颜色插值）
-                                Eigen::Vector3f n = ((1 - u - v) * v0.normal + u * v1.normal + v * v2.normal).normalized();
-                                Eigen::Vector3f lightDir = -scene.lights[0].direction.normalized();
-                                float intensity = std::max(0.0f, n.dot(lightDir));
-                                hitColor = intensity * Eigen::Vector3f(1, 1, 1); // 临时白光
+//
+                for (const auto& accel : meshAccels) {
+                    // 把 ray 从世界空间变换到当前 mesh 局部空间
+                    Eigen::Vector3f rayOriginLocal = (invModel * cameraPos.homogeneous()).hnormalized();
+                    Eigen::Vector3f rayDirLocal = (invModel * rayDir.homogeneous()).hnormalized();
+                
+                    // 遍历 BVH
+                    float t, u, v;
+                    int triangleIndex = -1;
+                    Ray ray(rayOriginLocal, rayDirLocal);
+                    if (intersectBVH(accel.bvhNodes, accel.rootNode, accel.mesh->vertices, accel.mesh->indices,
+                        accel.triangleRefs, ray, t, u, v, triangleIndex)) {
+                        if (t < minT) {
+                            minT = t;
+                        
+                            // 获取三角形信息
+                            const TriangleRef& tri = accel.triangleRefs[triangleIndex];
+                            const Vertex& v0 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+0]];
+                            const Vertex& v1 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+1]];
+                            const Vertex& v2 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+2]];
+                        
+                            // 插值颜色
+                            Eigen::Vector3f diffuse(1.0f, 1.0f, 1.0f);
+                            if (accel.mesh->texture != nullptr) {
+                                float texU = v0.uv.x() * (1 - u - v) + v1.uv.x() * u + v2.uv.x() * v;
+                                float texV = v0.uv.y() * (1 - u - v) + v1.uv.y() * u + v2.uv.y() * v;
+                                int texX = static_cast<int>(texU * accel.mesh->texture->width);
+                                int texY = static_cast<int>(texV * accel.mesh->texture->height);
+                                texX = std::clamp(texX, 0, accel.mesh->texture->width - 1);
+                                texY = std::clamp(texY, 0, accel.mesh->texture->height - 1);
+                                int offset = (texY * accel.mesh->texture->width + texX) * 4;
+                                diffuse = Eigen::Vector3f(
+                                    accel.mesh->texture->data[offset + 2] / 255.0f,
+                                    accel.mesh->texture->data[offset + 1] / 255.0f,
+                                    accel.mesh->texture->data[offset + 0] / 255.0f
+                                );
                             }
+                        
+                            // 插值法线，转回世界空间
+                            Eigen::Vector3f n = ((1 - u - v) * v0.normal + u * v1.normal + v * v2.normal).normalized();
+                            n = (modelMatrix * n.homogeneous()).hnormalized();  // 回到世界空间
+                        
+                            // 光照
+                            Eigen::Vector3f lightDir = -scene.lights[0].direction.normalized();
+                            float intensity = std::max(0.0f, n.dot(lightDir));
+                            Eigen::Vector3f shading = intensity * Eigen::Vector3f(1, 1, 1);
+                            hitColor = diffuse.cwiseProduct(shading);
                         }
                     }
+                    //for (int i=0;i<object.meshes[0].indices.size();i+=3){
+                    //    const Vertex& v0 = object.meshes[0].vertices[object.meshes[0].indices[i]];
+                    //    const Vertex& v1 = object.meshes[0].vertices[object.meshes[0].indices[i+1]];
+                    //    const Vertex& v2 = object.meshes[0].vertices[object.meshes[0].indices[i+2]];
+                    //    if (intersectRayTriangle(
+                    //        rayOriginLocal, rayDirLocal,
+                    //        v0.position, v1.position, v2.position,
+                    //        t, u, v
+                    //    )) {
+                    //        if (t < minT) {
+                    //            minT = t;
+                    //            hitColor = Eigen::Vector3f(1, 0, 0); // Red color for hit
+                    //        }
+                    //    }
+                    //}
                 }
+//
             }
 
             // 写入颜色
@@ -272,8 +459,7 @@ Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
             texture.data[idx + 1] = std::min(255.0f, hitColor.y() * 255);
             texture.data[idx + 2] = std::min(255.0f, hitColor.z() * 255);
             texture.data[idx + 3] = 255;
-        }
-    }
+    });
 
     return texture;
 }

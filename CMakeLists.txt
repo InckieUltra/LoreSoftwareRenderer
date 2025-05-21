@@ -50,7 +50,7 @@ target_compile_definitions(App PRIVATE
 )
 
 target_compile_options(App PRIVATE
-    $<$<CXX_COMPILER_ID:MSVC>:/wd4127 /wd4201 /wd4100 /wd4189 /wd4244>
+    $<$<CXX_COMPILER_ID:MSVC>:/wd4127 /wd4201 /wd4100 /wd4189 /wd4244 /wd4267>
 )
 
 add_custom_command(
