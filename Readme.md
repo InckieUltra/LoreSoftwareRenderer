@@ -3,13 +3,16 @@
 ---
 
 CPU软件渲染器，支持Phong Shading光栅化渲染，以及漫反射或者镜面反射的光线追踪渲染。
+
 使用SDL2创建窗口和接受交互输入，使用TinyObjLoader读取模型。
+
 没做啥优化，光线追踪现在是1spp和1次弹射，时序降噪后看着还行。
 
 ---
 
 ## Showcase
 时序降噪静帧：
+
 ![D3 VK3QYR{VTASDQ54YQT4J](https://github.com/user-attachments/assets/b0efe041-bf3a-4950-b465-6784ce332c3a)
 
 镜面反射动态：
