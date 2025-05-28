@@ -11,8 +11,10 @@ CPU软件渲染器，支持Phong Shading光栅化渲染，以及漫反射或者�
 ## Showcase
 时序降噪静帧：
 ![D3 VK3QYR{VTASDQ54YQT4J](https://github.com/user-attachments/assets/b0efe041-bf3a-4950-b465-6784ce332c3a)
+
 镜面反射动态：
 https://github.com/user-attachments/assets/3526a657-d034-4a8b-9fe1-0305c953f5d0
+
 漫反射动态：
 https://github.com/user-attachments/assets/fd73b6a6-6ecf-4d81-9874-b78293428ec4
 
