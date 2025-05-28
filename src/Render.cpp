@@ -5,6 +5,40 @@
 #include "BVH.h"
 #include <stack>
 
+inline float randf() {
+    return static_cast<float>(rand()) / static_cast<float>(RAND_MAX);
+}
+
+// 余弦加权半球采样
+Eigen::Vector3f cosineWeightedSampleHemisphere(const Eigen::Vector3f& normal) {
+    float r1 = randf(); // [0, 1)
+    float r2 = randf(); // [0, 1)
+
+    // 极坐标转直角坐标（余弦加权）
+    float phi = 2.0f * M_PI * r1;
+    float r = std::sqrt(r2);
+    float x = r * std::cos(phi);
+    float y = r * std::sin(phi);
+    float z = std::sqrt(1.0f - r2);
+
+    // 构建局部坐标系（TBN）
+    Eigen::Vector3f N = normal.normalized();
+    Eigen::Vector3f T, B;
+
+    // 避免退化，选个不平行的向量构造正交基
+    if (std::fabs(N.x()) > 0.1f)
+        T = Eigen::Vector3f(0.0f, 1.0f, 0.0f);
+    else
+        T = Eigen::Vector3f(1.0f, 0.0f, 0.0f);
+
+    B = N.cross(T).normalized();
+    T = B.cross(N); // 保证 T、B、N 构成右手系
+
+    // 局部坐标转世界坐标
+    Eigen::Vector3f sampleDir = x * T + y * B + z * N;
+    return sampleDir.normalized();
+}
+
 uint32_t toARGB(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     return (a << 24) | (b << 16) | (g << 8) | r;
 }
@@ -16,7 +50,8 @@ void drawFilledTriangle(Texture& renderTarget, DepthBuffer& depthBuffer,
     const Eigen::Vector3f& vp0, const Eigen::Vector3f& vp1, const Eigen::Vector3f& vp2,
     const Eigen::Vector2f& uv0, const Eigen::Vector2f& uv1, const Eigen::Vector2f& uv2,
     const Texture* texture,
-    const DirectionalLight& light, const Eigen::Vector3f& cameraPos) {
+    const DirectionalLight& light, const PointLight& pointLight,
+     const Eigen::Vector3f& cameraPos) {
     // Barycentric rasterization
     int minX = std::max(0, (int)std::floor(std::min({p0.x(), p1.x(), p2.x()})));
     int maxX = std::min(renderTarget.width - 1, (int)std::ceil(std::max({p0.x(), p1.x(), p2.x()})));
@@ -60,13 +95,21 @@ void drawFilledTriangle(Texture& renderTarget, DepthBuffer& depthBuffer,
                     Eigen::Vector3f normal = w0 * n0.head<3>() + w1 * n1.head<3>() + w2 * n2.head<3>();
                     normal.normalize();
                     Eigen::Vector3f lightDir = light.direction.normalized();
+                    Eigen::Vector3f pointLightDir = (pointLight.position - 
+                        (w0*vp0.head<3>()+w1*vp1.head<3>()+w2*vp2.head<3>())).normalized();
+                    float pointLightDistance = (pointLight.position -
+                        (w0*vp0.head<3>()+w1*vp1.head<3>()+w2*vp2.head<3>())).norm();
+                    float attenuation = 1.0f / (1.0f + pointLightDistance * pointLightDistance);
+                    float pointLightIntensity = pointLight.intensity * attenuation * 
+                        std::max(0.0f, normal.dot(pointLightDir));
                     Eigen::Vector3f viewDir = (cameraPos - 
                         (w0*vp0.head<3>()+w1*vp1.head<3>()+w2*vp2.head<3>())).normalized();
-                    Eigen::Vector3f reflectDir = (2.0f * normal.dot(lightDir) * normal - lightDir).normalized();
+                    Eigen::Vector3f reflectDir = (2.0f * normal.dot(-pointLightDir) * normal + pointLightDir).normalized();
                     float specAngle = std::max(0.0f, reflectDir.dot(viewDir));
-                    float shininess = 32.0f; // 高光指数，值越大高光越集中
+                    float shininess = 50.0f; // 高光指数，值越大高光越集中
                     float specular = std::pow(specAngle, shininess);
-                    float intensity = light.intensity * std::max(0.0f, normal.dot(lightDir)) + specular + 0.1f;
+                    float intensity = pointLightIntensity + specular + 0.1f + 
+                        std::max(0.0f, normal.dot(lightDir)) * light.intensity * 0;
                     intensity = std::min(intensity, 1.0f); // Clamp to [0, 1]
                     color.head<3>() = color.head<3>().array() * light.color.array() * intensity;
                     renderTarget.data[index * 4 + 0] = static_cast<uint8_t>(color.x() * 255);
@@ -134,11 +177,7 @@ Texture RenderScene(Scene& scene, int width, int height) {
                 const Vertex& v2 = mesh.vertices[mesh.indices[i + 2]];
 
                 // Get model matrix for the object
-                Eigen::Matrix4f modelMatrix = Eigen::Affine3f(
-                    Eigen::Translation3f(object.transform.position) *
-                    object.transform.rotation.toRotationMatrix() *
-                    Eigen::Scaling(object.transform.scale)
-                ).matrix();
+                const Eigen::Matrix4f& modelMatrix = object.modelMatrix;
 
                 // Combine model, view, and projection matrices
                 Eigen::Matrix4f mvpMatrix = vpMatrix * modelMatrix;
@@ -171,7 +210,8 @@ Texture RenderScene(Scene& scene, int width, int height) {
                     v0.position, v1.position, v2.position,
                     v0.uv, v1.uv, v2.uv,
                     mesh.texture,
-                    scene.lights[0], // Assuming a single directional light,
+                    scene.directionalLight, // Assuming a single directional light,
+                    scene.pointLight, // Assuming a single point light
                     scene.camera.position // Camera position for lighting calculations
                 );
             }
@@ -182,6 +222,7 @@ Texture RenderScene(Scene& scene, int width, int height) {
 }
 
 struct MeshAccel {
+    const Object* object;               // 指向原 object
     const Mesh* mesh;                     // 指向原 mesh
     std::vector<BVHNode> bvhNodes;        // 当前 mesh 的 BVH
     std::vector<TriangleRef> triangleRefs;
@@ -267,52 +308,129 @@ bool intersectBVH(
     return hit;
 }
 
-//Eigen::Vector3f traceRay(
-//    const Ray& ray,
-//    const Scene& scene,
-//    const std::vector<BVHNode>& nodes,
-//    const std::vector<TriangleRef>& refs,
-//    int depth
-//) {
-//    if (depth > 3) return Eigen::Vector3f(0, 0, 0);  // 最多反射 3 次
-//
-//    float t, u, v;
-//    TriangleRef hitTri;
-//    const Mesh* hitMesh = nullptr;
-//
-//    bool hit = intersectBVH(ray, scene, nodes, refs, t, u, v, hitTri);
-//
-//    if (!hit) return Eigen::Vector3f(0.0f, 0.0f, 0.0f);  // 没命中，返回背景色
-//
-//    // === 命中后的插值计算 ===
-//    int triId = hitTri.triangleIndex;
-//    const auto& indices = hitMesh->indices;
-//    const auto& vertices = hitMesh->vertices;
-//
-//    const Vertex& v0 = vertices[indices[3 * triId + 0]];
-//    const Vertex& v1 = vertices[indices[3 * triId + 1]];
-//    const Vertex& v2 = vertices[indices[3 * triId + 2]];
-//    float w = 1 - u - v;
-//
-//    Eigen::Vector3f pos = ray.origin + t * ray.dir;
-//    Eigen::Vector3f normal = (w * v0.normal + u * v1.normal + v * v2.normal).normalized();
-//    Eigen::Vector3f color = (w * v0.color.head<3>() + u * v1.color.head<3>() + v * v2.color.head<3>());
-//
-//    // === 光照 ===
-//    Eigen::Vector3f lightDir = -scene.lights[0].direction.normalized();
-//    float diff = std::max(0.0f, normal.dot(lightDir));
-//    Eigen::Vector3f localColor = color * diff;
-//
-//    // === 反射光线 ===
-//    Eigen::Vector3f reflectDir = reflect(ray.dir.normalized(), normal).normalized();
-//    Ray reflectedRay(pos + 1e-4f * reflectDir, reflectDir);  // 避免自交
-//
-//    Eigen::Vector3f reflectedColor = traceRay(reflectedRay, scene, nodes, refs, depth + 1);
-//
-//    float reflectivity = 0.4f;  // 固定反射率，可以根据材质设置
-//
-//    return (1 - reflectivity) * localColor + reflectivity * reflectedColor;
-//}
+Eigen::Vector3f traceRay(
+    const std::vector<MeshAccel>& meshAccels,
+    const MeshAccel& accel, const Ray& rayWorld,
+    DirectionalLight& directionalLight, PointLight& pointLight,
+    float& minT,
+    bool& update,
+    int BounceCount
+) {
+    if (BounceCount < 1) {
+        return Eigen::Vector3f(0, 0, 0);
+    }
+    Eigen::Vector3f hitColor(0, 0, 0);
+
+    const Eigen::Matrix4f& modelMatrix = accel.object->modelMatrix;
+    const Eigen::Matrix4f& invModel = accel.object->invModelMatrix;
+
+    // 把 ray 从世界空间变换到当前 mesh 局部空间
+    Eigen::Vector3f rayOriginLocal = (invModel * rayWorld.origin.homogeneous()).hnormalized();
+    Eigen::Vector3f rayDirLocal = (invModel.block<3,3>(0,0) * rayWorld.dir).normalized();
+    
+    // 遍历 BVH
+    float t, u, v;
+    int triangleIndex = -1;
+    Ray ray(rayOriginLocal, rayDirLocal);
+    if (intersectBVH(accel.bvhNodes, accel.rootNode, accel.mesh->vertices, accel.mesh->indices,
+        accel.triangleRefs, ray, t, u, v, triangleIndex)
+    ) {
+        if (t < minT) {
+            minT = t;
+            update = true;
+
+            // 获取三角形信息
+            const TriangleRef& tri = accel.triangleRefs[triangleIndex];
+            const Vertex& v0 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+0]];
+            const Vertex& v1 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+1]];
+            const Vertex& v2 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+2]];
+            // 插值颜色
+            Eigen::Vector3f diffuse(1.0f, 1.0f, 1.0f);
+            if (accel.mesh->texture != nullptr) {
+                float texU = v0.uv.x() * (1 - u - v) + v1.uv.x() * u + v2.uv.x() * v;
+                float texV = v0.uv.y() * (1 - u - v) + v1.uv.y() * u + v2.uv.y() * v;
+                int texX = static_cast<int>(texU * accel.mesh->texture->width);
+                int texY = static_cast<int>(texV * accel.mesh->texture->height);
+                texX = std::clamp(texX, 0, accel.mesh->texture->width - 1);
+                texY = std::clamp(texY, 0, accel.mesh->texture->height - 1);
+                int offset = (texY * accel.mesh->texture->width + texX) * 4;
+                diffuse = Eigen::Vector3f(
+                    accel.mesh->texture->data[offset + 2] / 255.0f,
+                    accel.mesh->texture->data[offset + 1] / 255.0f,
+                    accel.mesh->texture->data[offset + 0] / 255.0f
+                );
+            }
+        
+            // 插值法线，转回世界空间
+            Eigen::Vector3f n = ((1 - u - v) * v0.normal + u * v1.normal + v * v2.normal).normalized();
+            n = (modelMatrix.block<3,3>(0,0)*n).normalized();  // 回到世界空间
+        
+            Eigen::Vector3f hitPos = rayOriginLocal + t * rayDirLocal;
+            hitPos = (modelMatrix * hitPos.homogeneous()).hnormalized();
+
+            // 光照
+            Eigen::Vector3f shading(0, 0, 0);
+            Eigen::Vector3f PointLightDir = (pointLight.position - hitPos).normalized();
+            Eigen::Vector3f PointLightPos = hitPos + 0.001f * PointLightDir;
+            float pointLightDistance = (pointLight.position - hitPos).norm();
+            bool good = true;
+            for (auto shadowAccel : meshAccels) {
+                Eigen::Vector3f LocalPointLightPos = (shadowAccel.object->invModelMatrix * PointLightPos.homogeneous()).hnormalized();
+                Eigen::Vector3f LocalPointLightDir = (shadowAccel.object->invModelMatrix.block<3,3>(0,0) * PointLightDir).normalized();
+                if (intersectBVH(shadowAccel.bvhNodes, shadowAccel.rootNode, shadowAccel.mesh->vertices, shadowAccel.mesh->indices,
+                    shadowAccel.triangleRefs, Ray(LocalPointLightPos, LocalPointLightDir), t, u, v, triangleIndex)
+                ) {
+                    if (t < pointLightDistance-0.1f) {
+                        good = false;
+                        break;
+                    }
+                }
+            }
+            if (good){
+                float intensity = 0;
+                float attenuation = 1.0f / (1.0f + pointLightDistance * pointLightDistance);
+                float pointLightIntensity = std::max(0.0f, n.dot(PointLightDir)) * pointLight.intensity * attenuation;
+                intensity += pointLightIntensity;
+                shading = intensity * Eigen::Vector3f(1, 1, 1);
+            }
+            float pdf_direct = std::max(0.0f, PointLightDir.dot(n)) / (float)M_PI;
+        
+            Eigen::Vector3f reflectColor(0, 0, 0);
+            Eigen::Vector3f reflectDir = n;
+            Eigen::Vector3f f_r = diffuse / (float)M_PI;
+            float pdf_indirect = 0.0f;
+            if (BounceCount > 1){
+                Eigen::Vector3f reflectRayPos = hitPos + 0.001f * n; // 偏移一点，避免自相交
+                Eigen::Vector3f reflectRayDir = cosineWeightedSampleHemisphere(n);
+                //reflectRayDir = rayWorld.dir - 2.0f * rayWorld.dir.dot(n) * n;
+                pdf_indirect = std::max(0.0f, reflectRayDir.dot(n)) / (float)M_PI;
+                Ray reflectRay(reflectRayPos, reflectRayDir);
+                float _minT = std::numeric_limits<float>::max();
+                for (const MeshAccel& meshAccel : meshAccels) {
+                    bool _update = false;
+                    // 反射光线
+                    Eigen::Vector3f _reflectColor = traceRay(
+                        meshAccels,
+                        meshAccel, reflectRay,
+                        directionalLight,
+                        pointLight,
+                        _minT,
+                        _update,
+                        BounceCount - 1
+                    );
+                    if (_update) {
+                        reflectColor = _reflectColor;
+                    }
+                }
+            }
+            
+            hitColor = f_r.cwiseProduct(shading) * std::max(0.0f, PointLightDir.dot(n)) / (pdf_direct+1e-6f);
+            hitColor += f_r.cwiseProduct(reflectColor) * std::max(0.0f, reflectDir.dot(n)) / (pdf_indirect+1e-6f);
+            //hitColor += f_r.cwiseProduct(reflectColor*1.0f);
+        }
+    }      
+    return hitColor;
+}
 
 Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
     Texture texture;
@@ -331,13 +449,9 @@ Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
     std::vector<MeshAccel> meshAccels;
 
     for (auto& object: scene.objects) {
-        Eigen::Matrix4f modelMatrix = Eigen::Affine3f(
-            Eigen::Translation3f(object.transform.position) *
-            object.transform.rotation.toRotationMatrix() *
-            Eigen::Scaling(object.transform.scale)
-        ).matrix();
         for (const auto& mesh : object.meshes) {
             MeshAccel accel;
+            accel.object = &object;
             accel.mesh = &mesh;
             std::vector<Eigen::Vector3f> positions;
             for (size_t i = 0; i < mesh.indices.size(); i += 3) {
@@ -376,88 +490,31 @@ Texture RenderSceneRayTracing(Scene& scene, int width, int height) {
             Eigen::Vector3f rayDir = (invView.block<3,3>(0,0) * Eigen::Vector3f(px, py, -1.0f)).normalized();
 
             // 与场景求交
-            Eigen::Vector3f hitColor(0, 0, 0);
-            float minT = std::numeric_limits<float>::max();
-            for (const auto& object : scene.objects) {
-                Eigen::Matrix4f modelMatrix = Eigen::Affine3f(
-                    Eigen::Translation3f(object.transform.position) *
-                    object.transform.rotation.toRotationMatrix() *
-                    Eigen::Scaling(object.transform.scale)
-                ).matrix();
-                Eigen::Matrix4f invModel = modelMatrix.inverse();
-//
-                for (const auto& accel : meshAccels) {
-                    // 把 ray 从世界空间变换到当前 mesh 局部空间
-                    Eigen::Vector3f rayOriginLocal = (invModel * cameraPos.homogeneous()).hnormalized();
-                    Eigen::Vector3f rayDirLocal = (invModel * rayDir.homogeneous()).hnormalized();
+            Eigen::Vector3f pixelColor(0, 0, 0);
+            float minT = std::numeric_limits<float>::max();//              
                 
-                    // 遍历 BVH
-                    float t, u, v;
-                    int triangleIndex = -1;
-                    Ray ray(rayOriginLocal, rayDirLocal);
-                    if (intersectBVH(accel.bvhNodes, accel.rootNode, accel.mesh->vertices, accel.mesh->indices,
-                        accel.triangleRefs, ray, t, u, v, triangleIndex)) {
-                        if (t < minT) {
-                            minT = t;
-                        
-                            // 获取三角形信息
-                            const TriangleRef& tri = accel.triangleRefs[triangleIndex];
-                            const Vertex& v0 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+0]];
-                            const Vertex& v1 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+1]];
-                            const Vertex& v2 = accel.mesh->vertices[accel.mesh->indices[triangleIndex*3+2]];
-                        
-                            // 插值颜色
-                            Eigen::Vector3f diffuse(1.0f, 1.0f, 1.0f);
-                            if (accel.mesh->texture != nullptr) {
-                                float texU = v0.uv.x() * (1 - u - v) + v1.uv.x() * u + v2.uv.x() * v;
-                                float texV = v0.uv.y() * (1 - u - v) + v1.uv.y() * u + v2.uv.y() * v;
-                                int texX = static_cast<int>(texU * accel.mesh->texture->width);
-                                int texY = static_cast<int>(texV * accel.mesh->texture->height);
-                                texX = std::clamp(texX, 0, accel.mesh->texture->width - 1);
-                                texY = std::clamp(texY, 0, accel.mesh->texture->height - 1);
-                                int offset = (texY * accel.mesh->texture->width + texX) * 4;
-                                diffuse = Eigen::Vector3f(
-                                    accel.mesh->texture->data[offset + 2] / 255.0f,
-                                    accel.mesh->texture->data[offset + 1] / 255.0f,
-                                    accel.mesh->texture->data[offset + 0] / 255.0f
-                                );
-                            }
-                        
-                            // 插值法线，转回世界空间
-                            Eigen::Vector3f n = ((1 - u - v) * v0.normal + u * v1.normal + v * v2.normal).normalized();
-                            n = (modelMatrix * n.homogeneous()).hnormalized();  // 回到世界空间
-                        
-                            // 光照
-                            Eigen::Vector3f lightDir = -scene.lights[0].direction.normalized();
-                            float intensity = std::max(0.0f, n.dot(lightDir));
-                            Eigen::Vector3f shading = intensity * Eigen::Vector3f(1, 1, 1);
-                            hitColor = diffuse.cwiseProduct(shading);
-                        }
-                    }
-                    //for (int i=0;i<object.meshes[0].indices.size();i+=3){
-                    //    const Vertex& v0 = object.meshes[0].vertices[object.meshes[0].indices[i]];
-                    //    const Vertex& v1 = object.meshes[0].vertices[object.meshes[0].indices[i+1]];
-                    //    const Vertex& v2 = object.meshes[0].vertices[object.meshes[0].indices[i+2]];
-                    //    if (intersectRayTriangle(
-                    //        rayOriginLocal, rayDirLocal,
-                    //        v0.position, v1.position, v2.position,
-                    //        t, u, v
-                    //    )) {
-                    //        if (t < minT) {
-                    //            minT = t;
-                    //            hitColor = Eigen::Vector3f(1, 0, 0); // Red color for hit
-                    //        }
-                    //    }
-                    //}
+            for (const MeshAccel& accel : meshAccels) {
+                bool update = false;
+                Eigen::Vector3f hitColor = traceRay(
+                    meshAccels,
+                    accel, Ray(cameraPos, rayDir),
+                    scene.directionalLight,
+                    scene.pointLight,
+                    minT, update,
+                    2
+                );
+
+                if (update) {
+                    pixelColor = hitColor;
                 }
-//
+                
             }
 
             // 写入颜色
             int idx = (y * width + x) * 4;
-            texture.data[idx + 0] = std::min(255.0f, hitColor.x() * 255);
-            texture.data[idx + 1] = std::min(255.0f, hitColor.y() * 255);
-            texture.data[idx + 2] = std::min(255.0f, hitColor.z() * 255);
+            texture.data[idx + 0] = std::min(255.0f, pixelColor.x() * 255);
+            texture.data[idx + 1] = std::min(255.0f, pixelColor.y() * 255);
+            texture.data[idx + 2] = std::min(255.0f, pixelColor.z() * 255);
             texture.data[idx + 3] = 255;
     });
 

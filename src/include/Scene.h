@@ -13,5 +13,6 @@ public:
 public:
     Camera camera;
     std::vector<Object> objects;
-    std::vector<DirectionalLight> lights;
+    DirectionalLight directionalLight;
+    PointLight pointLight;
 };

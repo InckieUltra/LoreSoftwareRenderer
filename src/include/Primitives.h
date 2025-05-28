@@ -29,14 +29,38 @@ struct Transform {
 struct Object {
     Object() {}
     Object(std::vector<Mesh> meshes, Transform transform)
-        : meshes(meshes), transform(transform) {}
+        : meshes(meshes), transform(transform) {
+            update_matrix();
+        }
 
     std::vector<Mesh> meshes;
     Transform transform;
+    Eigen::Matrix4f modelMatrix;
+    Eigen::Matrix4f invModelMatrix;
+
+    void update_matrix(){
+        modelMatrix = Eigen::Affine3f(
+            Eigen::Translation3f(transform.position) *
+            transform.rotation.toRotationMatrix() *
+            Eigen::Scaling(transform.scale)
+        ).matrix();
+        invModelMatrix = modelMatrix.inverse();
+    }
+
+    void update_transform(const Transform& new_transform) {
+        transform = new_transform;
+        update_matrix();
+    }
 };
 
 struct DirectionalLight {
     Eigen::Vector3f direction;
+    Eigen::Vector3f color;
+    float intensity;
+};
+
+struct PointLight {
+    Eigen::Vector3f position;
     Eigen::Vector3f color;
     float intensity;
 };
