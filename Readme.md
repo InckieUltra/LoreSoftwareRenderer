@@ -11,6 +11,16 @@ CPU软件渲染器，支持Phong Shading光栅化渲染，以及漫反射或者�
 ---
 
 ## Showcase
+
+phong shading（可以看到明显的ambient、lighting和specular效果）：
+
+![2025-06-20 00-41-44](https://github.com/user-attachments/assets/5c53a94f-0037-4e0d-bcb4-2e5989d9fcda)
+
+正交投影（可以看到没啥透视效果）：
+
+![2025-06-20 00-43-03](https://github.com/user-attachments/assets/2d919e72-1917-493d-b184-ba7c2396b8b8)
+
+
 时序降噪静帧：
 
 ![D3 VK3QYR{VTASDQ54YQT4J](https://github.com/user-attachments/assets/b0efe041-bf3a-4950-b465-6784ce332c3a)
