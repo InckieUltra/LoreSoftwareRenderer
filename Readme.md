@@ -21,6 +21,8 @@ phong shading（可以看到明显的ambient、lighting和specular效果）：
 ![2025-06-20 00-43-03](https://github.com/user-attachments/assets/2d919e72-1917-493d-b184-ba7c2396b8b8)
 
 
+下面的是光线追踪效果，也就是实现了间接光照，有明显的direct lighting和indirect lighting效果。
+
 时序降噪静帧：
 
 ![D3 VK3QYR{VTASDQ54YQT4J](https://github.com/user-attachments/assets/b0efe041-bf3a-4950-b465-6784ce332c3a)
