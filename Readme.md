@@ -16,11 +16,13 @@ CPU软件渲染器，支持Phong Shading光栅化渲染，以及漫反射或者�
 ![D3 VK3QYR{VTASDQ54YQT4J](https://github.com/user-attachments/assets/b0efe041-bf3a-4950-b465-6784ce332c3a)
 
 镜面反射动态：
-https://github.com/user-attachments/assets/3526a657-d034-4a8b-9fe1-0305c953f5d0
+
+![448501927-3526a657-d034-4a8b-9fe1-0305c953f5d0](https://github.com/user-attachments/assets/9861ad06-c952-4177-a72a-8cc9bbd45be0)
+
 
 漫反射动态：
-https://github.com/user-attachments/assets/fd73b6a6-6ecf-4d81-9874-b78293428ec4
 
+![448502371-fd73b6a6-6ecf-4d81-9874-b78293428ec4](https://github.com/user-attachments/assets/b63a8702-53c3-42d8-9904-fd08d6b40e7f)
 
 
 ---
